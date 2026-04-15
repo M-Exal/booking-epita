@@ -38,7 +38,7 @@ public class CreditCardConverter implements AttributeConverter<String, String> {
 
     private String panMasking(String pan) {
         // Step 6:
-        return pan;
+        return pan.replaceAll("(?<=\\d{4})\\d{4}(?=\\d+)", "******");
         // Step 6: End
     }
 
