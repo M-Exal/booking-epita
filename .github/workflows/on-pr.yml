@@ -1,6 +1,8 @@
 name: Security Scans
 
 on:
+  push:
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
 
@@ -10,7 +12,7 @@ permissions:
   actions: read
 
 jobs:
-  # --- JOB 1: Analyse des Dépendances ---
+  # --- JOB 1: Analyse des Dépendances (OSV) ---
   DependenciesAnalysis:
     name: Run OSV Scanner
     runs-on: ubuntu-latest
@@ -23,35 +25,45 @@ jobs:
       - name: Run OSV Scanner (Current PR)
         uses: google/osv-scanner-action/osv-scanner-action@main
         with:
-          scan-args: --format sarif --output pr-analysis.sarif ./
-        continue-on-error: true
+          # AJOUT : --fail-on-vuln force l'échec du job si une faille est trouvée
+          scan-args: --format sarif --output pr-analysis.sarif --fail-on-vuln ./
+        continue-on-error: true # On laisse à true pour pouvoir faire la comparaison après
 
       - name: checkout baseline commit
+        if: github.event_name == 'pull_request'
         run: |
           git checkout ${{ github.event.pull_request.base.sha }}
 
       - name: Run OSV Scanner (Baseline)
+        if: github.event_name == 'pull_request'
         uses: google/osv-scanner-action/osv-scanner-action@main
         with:
           scan-args: --format sarif --output baseline-analysis.sarif ./
         continue-on-error: true
 
       - name: Generate Differential Report
+        if: github.event_name == 'pull_request'
         run: |
           echo "### OSV Security Scan Diff" > diff-report.txt
-          echo "Baseline: ${{ github.event.pull_request.base.sha }}" >> diff-report.txt
-          echo "PR Head: ${{ github.sha }}" >> diff-report.txt
-          echo "-----------------------------------" >> diff-report.txt
-          # Un diff simple pour identifier les nouvelles vulnérabilités détectées dans le SARIF
           diff baseline-analysis.sarif pr-analysis.sarif >> diff-report.txt || true
 
       - name: Save differential report as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: osv-differential-report
           path: diff-report.txt
 
-  # --- JOB 2: Analyse du Code Source ---
+      # Étape cruciale : On fait échouer le job ici si le scan PR a trouvé quelque chose
+      - name: Check for vulnerabilities
+        if: github.event_name == 'pull_request'
+        run: |
+          if grep -q "result" pr-analysis.sarif; then
+            echo "Vulnerabilities detected in PR!"
+            exit 1
+          fi
+
+  # --- JOB 2: Analyse du Code Source (Semgrep) ---
   SourceCodeAnalysis:
     name: Run Semgrep
     runs-on: ubuntu-latest
@@ -64,14 +76,20 @@ jobs:
           fetch-depth: 0
 
       - name: Run differential analysis with semgrep
+        # --error : Sortie 1 si trouvé
+        # --metrics off : évite le bruit dans les logs
         run: |
           semgrep scan \
             --config .semgrep \
+            --config "p/java" \
+            --config "p/owasp-top-10" \
             --baseline-commit ${{ github.event.pull_request.base.sha }} \
             --sarif \
-            --output semgrep-diff.sarif
+            --output semgrep-diff.sarif \
+            --error
 
       - name: Save differential report as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-differential-report
