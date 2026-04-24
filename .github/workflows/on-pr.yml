@@ -17,28 +17,23 @@ jobs:
     name: Run OSV Scanner
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout PR Branch
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run OSV Scanner (Current PR)
+      - name: Run OSV Scanner (Current)
         uses: google/osv-scanner-action/osv-scanner-action@main
         with:
-          # AJOUT : --fail-on-vuln force l'échec du job si une faille est trouvée
           scan-args: --format sarif --output pr-analysis.sarif --fail-on-vuln ./
-        continue-on-error: true # On laisse à true pour pouvoir faire la comparaison après
-
-      - name: checkout baseline commit
-        if: github.event_name == 'pull_request'
-        run: |
-          git checkout ${{ github.event.pull_request.base.sha }}
+        continue-on-error: true
 
       - name: Run OSV Scanner (Baseline)
         if: github.event_name == 'pull_request'
         uses: google/osv-scanner-action/osv-scanner-action@main
         with:
-          scan-args: --format sarif --output baseline-analysis.sarif ./
+          # On scanne directement le commit de base sans faire de checkout pour éviter les erreurs Git
+          scan-args: --format sarif --output baseline-analysis.sarif --commit ${{ github.event.pull_request.base.sha }}
         continue-on-error: true
 
       - name: Generate Differential Report
@@ -47,19 +42,20 @@ jobs:
           echo "### OSV Security Scan Diff" > diff-report.txt
           diff baseline-analysis.sarif pr-analysis.sarif >> diff-report.txt || true
 
-      - name: Save differential report as artifact
+      - name: Save OSV Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: osv-differential-report
-          path: diff-report.txt
+          path: |
+            pr-analysis.sarif
+            diff-report.txt
 
-      # Étape cruciale : On fait échouer le job ici si le scan PR a trouvé quelque chose
-      - name: Check for vulnerabilities
+      - name: Fail if vulnerabilities found
         if: github.event_name == 'pull_request'
         run: |
           if grep -q "result" pr-analysis.sarif; then
-            echo "Vulnerabilities detected in PR!"
+            echo "Vulnerabilities detected!"
             exit 1
           fi
 
@@ -75,20 +71,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run differential analysis with semgrep
-        # --error : Sortie 1 si trouvé
-        # --metrics off : évite le bruit dans les logs
+      - name: Run Semgrep Scan
         run: |
+          # On définit la baseline : si c'est une PR, on prend la base, sinon on ne met pas de baseline
+          BASELINE_ARG=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASELINE_ARG="--baseline-commit ${{ github.event.pull_request.base.sha }}"
+          fi
+          
           semgrep scan \
             --config .semgrep \
             --config "p/java" \
             --config "p/owasp-top-10" \
-            --baseline-commit ${{ github.event.pull_request.base.sha }} \
+            $BASELINE_ARG \
             --sarif \
             --output semgrep-diff.sarif \
             --error
 
-      - name: Save differential report as artifact
+      - name: Save Semgrep Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -96,7 +96,7 @@ jobs:
           path: semgrep-diff.sarif
 
       - name: Upload SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: semgrep-diff.sarif
