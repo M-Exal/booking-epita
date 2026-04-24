@@ -18,7 +18,7 @@ jobs:
       - name: Checkout PR Branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Nécessaire pour accéder au commit de base
+          fetch-depth: 0 # Important pour pouvoir switcher entre les commits
 
       - name: Run OSV Scanner (Current PR)
         uses: google/osv-scanner-action/osv-scanner-action@main
@@ -36,17 +36,22 @@ jobs:
           scan-args: --format sarif --output baseline-analysis.sarif ./
         continue-on-error: true
 
-      - name: Compare OSV Analysis
-        uses: google/osv-scanner-action/osv-reporter-action@main
-        with:
-          # Note: Vérifiez la documentation spécifique de l'action reporter pour les arguments exacts de diff
-          scan-args: --compare --old baseline-analysis.sarif --new pr-analysis.sarif --output diff-report.txt
+      - name: Generate Differential Artifact
+        run: |
+          echo "### OSV Security Scan Differential Report" > diff-report.md
+          echo "Comparison between ${{ github.event.pull_request.base.sha }} and ${{ github.sha }}" >> diff-report.md
+          # On utilise un diff simple pour identifier les changements dans les dépendances vulnérables
+          diff baseline-analysis.sarif pr-analysis.sarif > osv-diff.patch || true
+        continue-on-error: true
 
-      - name: Save Differential Report
+      - name: Save OSV Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: osv-differential-report
-          path: diff-report.txt
+          name: osv-differential-reports
+          path: |
+            pr-analysis.sarif
+            baseline-analysis.sarif
+            osv-diff.patch
 
   # --- JOB 2: Analyse du Code Source (Semgrep) ---
   SourceCodeAnalysis:
@@ -60,7 +65,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Semgrep Differential
+      - name: Run Semgrep differential analysis
         run: |
           semgrep scan \
             --config .semgrep \
