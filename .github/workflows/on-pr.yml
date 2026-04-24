@@ -1,82 +1,75 @@
-name: Security Scans
-
+name: pull-request
 on:
-  push:
-    branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
 
 permissions:
-  contents: read
-  security-events: write
   actions: read
+  security-events: write
+  contents: read
 
 jobs:
-  # --- JOB 1: Analyse des Dépendances (OSV) ---
   DependenciesAnalysis:
-    name: Run OSV Scanner
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Run OSV Scanner
-        id: osv_scan
-        uses: google/osv-scanner-action/osv-scanner-action@main
-        with:
-          # On force le scan récursif et l'échec en cas de vulnérabilité
-          scan-args: --format sarif --output results.sarif --recursive --fail-on-vuln ./
-        continue-on-error: true
-
-      - name: Save OSV Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: osv-report
-          path: results.sarif
-
-      - name: Force Failure if Vulnerabilities
-        # On vérifie manuellement le SARIF pour forcer l'échec du job
-        run: |
-          if grep -q "ruleId" results.sarif; then
-            echo "Vulnerabilities found in dependencies!"
-            exit 1
-          fi
-
-  # --- JOB 2: Analyse du Code Source (Semgrep) ---
-  SourceCodeAnalysis:
-    name: Run Semgrep
-    runs-on: ubuntu-latest
-    container:
-      image: returntocorp/semgrep:latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run Semgrep PR (Differential)
-        if: github.event_name == 'pull_request'
-        run: |
-          semgrep scan \
-            --config .semgrep \
-            --config "p/java" \
-            --baseline-commit ${{ github.event.pull_request.base.sha }} \
-            --error \
-            --sarif \
-            --output semgrep.sarif
-
-      - name: Run Semgrep Push (Full Scan)
-        if: github.event_name == 'push'
-        run: |
-          semgrep scan \
-            --config .semgrep \
-            --config "p/java" \
-            --error \
-            --sarif \
-            --output semgrep.sarif
-
-      - name: Upload SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
+      - name: run osv-scanner (after PR)
+        uses: google/osv-scanner-action/osv-scanner-action@v1.9.0
         with:
-          sarif_file: semgrep.sarif
+          scan-args: |-
+            --format json
+            --output pr.json
+            --recursive
+            ./
+        continue-on-error: true
+
+      - name: checkout baseline commit
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+
+      - name: run osv-scanner (before PR)
+        uses: google/osv-scanner-action/osv-scanner-action@v1.9.0
+        with:
+          scan-args: |-
+            --format json
+            --output base.json
+            --recursive
+            ./
+        continue-on-error: true
+
+      - name: compare analysis
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/github/workspace -w /github/workspace --entrypoint /root/osv-reporter ghcr.io/google/osv-scanner-action:v1.9.0 \
+            --old=base.json --new=pr.json --output=DependenciesDiff.md --fail-on-vuln=true
+
+      - name: Save differential report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependencies-diff-report
+          path: DependenciesDiff.md
+
+  SemgrepAnalysis:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: run semgrep (new code only)
+            run: semgrep scan --config .semgrep/ --baseline-commit ${{ github.event.pull_request.base.sha }} --sarif --output semgrep-pr.sarif --error
+      - name: Save differential report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-diff-report
+          path: semgrep-pr.sarif
+      - name: Upload SARIF report
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep-pr.sarif    
