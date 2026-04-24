@@ -1,0 +1,81 @@
+name: Security Differential Scans
+
+on:
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # --- JOB 1: Analyse des Dépendances (OSV) ---
+  DependenciesAnalysis:
+    name: OSV Differential Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Nécessaire pour accéder au commit de base
+
+      - name: Run OSV Scanner (Current PR)
+        uses: google/osv-scanner-action/osv-scanner-action@main
+        with:
+          scan-args: --format sarif --output pr-analysis.sarif ./
+        continue-on-error: true
+
+      - name: Checkout Baseline Commit
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+
+      - name: Run OSV Scanner (Baseline)
+        uses: google/osv-scanner-action/osv-scanner-action@main
+        with:
+          scan-args: --format sarif --output baseline-analysis.sarif ./
+        continue-on-error: true
+
+      - name: Compare OSV Analysis
+        uses: google/osv-scanner-action/osv-reporter-action@main
+        with:
+          # Note: Vérifiez la documentation spécifique de l'action reporter pour les arguments exacts de diff
+          scan-args: --compare --old baseline-analysis.sarif --new pr-analysis.sarif --output diff-report.txt
+
+      - name: Save Differential Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: osv-differential-report
+          path: diff-report.txt
+
+  # --- JOB 2: Analyse du Code Source (Semgrep) ---
+  SourceCodeAnalysis:
+    name: Semgrep Differential Scan
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Semgrep Differential
+        run: |
+          semgrep scan \
+            --config .semgrep \
+            --baseline-commit ${{ github.event.pull_request.base.sha }} \
+            --sarif \
+            --output semgrep-diff.sarif
+
+      - name: Save Semgrep Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-differential-report
+          path: semgrep-diff.sarif
+
+      - name: Upload to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep-diff.sarif
