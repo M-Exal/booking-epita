@@ -26,13 +26,12 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: DependenciesAnalysisFull.sarif
-
   semgrep:
     name: Run Semgrep
     runs-on: ubuntu-latest
 
     container:
-      image: returntocorp/semgrep@main
+      image: returntocorp/semgrep:latest
 
     steps:
       - name: Checkout repository
